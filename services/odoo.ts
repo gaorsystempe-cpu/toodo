@@ -9,6 +9,9 @@ const xmlEscape = (str: string) =>
 
 // Serializer for XML-RPC parameters
 const serialize = (value: any): string => {
+  if (value === null || value === undefined) {
+    return `<string></string>`; // Odoo usually expects an empty string for nulls in XML-RPC
+  }
   if (typeof value === 'number') {
     return Number.isInteger(value) ? `<int>${value}</int>` : `<double>${value}</double>`;
   }
@@ -19,9 +22,9 @@ const serialize = (value: any): string => {
     return `<boolean>${value ? '1' : '0'}</boolean>`;
   }
   if (Array.isArray(value)) {
-    return `<array><data>${value.map(serialize).join('')}</data></array>`;
+    return `<array><data>${value.map(v => `<value>${serialize(v)}</value>`).join('')}</data></array>`;
   }
-  if (typeof value === 'object' && value !== null) {
+  if (typeof value === 'object') {
     if (value instanceof Date) {
         return `<string>${value.toISOString()}</string>`;
     }
@@ -29,7 +32,7 @@ const serialize = (value: any): string => {
       `<member><name>${k}</name><value>${serialize(v)}</value></member>`
     ).join('')}</struct>`;
   }
-  return '';
+  return `<string>${xmlEscape(String(value))}</string>`;
 };
 
 // Parser for XML-RPC responses
@@ -78,7 +81,7 @@ export class OdooClient {
   }
 
   private async rpcCall(endpoint: string, method: string, params: any[]) {
-    const xml = `<?xml version="1.0"?><methodCall><methodName>${method}</methodName><params>${params.map(p => `<param><value>${serialize(p)}</value></param>`).join('')}</params></methodCall>`;
+    const xml = `<?xml version="1.0"?><methodCall><methodName>${method}</methodName><params>${params.map(p => `<param><value>${serialize(p)}</value></param>`).join('')}</params></methodCall>`.trim();
 
     const targetUrl = `${this.url}/xmlrpc/2/${endpoint}`;
     let lastError: any = null;
@@ -87,34 +90,38 @@ export class OdooClient {
       return this.executeFetch(targetUrl, xml);
     }
 
+    // Try multiple proxies if one fails
     for (const proxyFn of this.proxies) {
       try {
         const fetchUrl = proxyFn(targetUrl);
         return await this.executeFetch(fetchUrl, xml);
       } catch (error: any) {
         lastError = error;
+        // If it's an Odoo Fault, don't retry, just throw
         if (error.message.includes('Fallo de Odoo')) throw error;
         continue; 
       }
     }
-    throw lastError || new Error("No se pudo conectar con Odoo.");
+    throw lastError || new Error("No se pudo conectar con el servidor Odoo.");
   }
 
   private async executeFetch(url: string, xml: string) {
-    const encoder = new TextEncoder();
-    const bodyBuffer = encoder.encode(xml);
+    // Use Blob to ensure correct encoding and Content-Type handling by the browser/proxy
+    const blob = new Blob([xml], { type: 'text/xml' });
 
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'text/xml',
-        'Accept': 'text/xml'
+        'Accept': 'text/xml',
+        // Manual Content-Type is sometimes overridden by Blob, which is safer
+        'Content-Type': 'text/xml'
       },
-      body: bodyBuffer
+      body: blob
     });
 
     if (!response.ok) {
-      throw new Error(`Error HTTP: ${response.status}`);
+      const errorText = await response.text().catch(() => '');
+      throw new Error(`Error HTTP: ${response.status} ${errorText.slice(0, 50)}`);
     }
 
     const text = await response.text();
@@ -127,20 +134,21 @@ export class OdooClient {
     
     const fault = doc.querySelector('fault');
     if (fault) {
-      const faultStruct = parseValue(fault.querySelector('value')!);
+      const faultValue = fault.querySelector('value');
+      const faultStruct = faultValue ? parseValue(faultValue) : { faultString: 'Error desconocido en Odoo' };
       throw new Error(`Fallo de Odoo: ${faultStruct.faultString}`);
     }
 
     const paramNode = doc.querySelector('params param value');
-    if (!paramNode) throw new Error('Respuesta XML-RPC sin datos.');
+    if (!paramNode) throw new Error('Respuesta XML-RPC sin datos válidos.');
     
     return parseValue(paramNode);
   }
 
   async authenticate(username: string, apiKey: string): Promise<number> {
     const uid = await this.rpcCall('common', 'authenticate', [this.db, username, apiKey, {}]);
-    if (!uid || typeof uid !== 'number') {
-      throw new Error("Autenticación fallida.");
+    if (uid === false || uid === undefined || typeof uid !== 'number') {
+      throw new Error("Autenticación fallida. Verifique sus credenciales.");
     }
     return uid;
   }

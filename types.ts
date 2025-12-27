@@ -67,6 +67,20 @@ export interface OdooSession {
   companyName?: string;
 }
 
+// Fixed error: Missing interface OdooCredential required by AdminPanel.tsx
+export interface OdooCredential {
+  id: string;
+  companyName: string;
+  friendlyName: string;
+  friendlyPassword?: string;
+  url: string;
+  db: string;
+  username: string;
+  apiKey: string;
+  isActive: boolean;
+  lastSync?: string;
+}
+
 export interface CartItem {
   producto: Producto;
   cantidad: number;
@@ -111,20 +125,6 @@ export interface SalesSummary {
   ordenes_totales: number;
   ticket_promedio: number;
   items_vendidos: number;
-}
-
-// Interface for Odoo credentials used in management panels
-export interface OdooCredential {
-  id: string;
-  companyName: string;
-  friendlyName: string;
-  friendlyPassword: string;
-  url: string;
-  db: string;
-  username: string;
-  apiKey: string;
-  isActive: boolean;
-  lastSync?: string;
 }
 
 export enum UserRole {
