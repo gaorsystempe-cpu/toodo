@@ -4,14 +4,122 @@ export enum UserRole {
   COMPANY_USER = 'COMPANY_USER'
 }
 
-export interface OdooCredential {
+export interface Producto {
+  id: number;
+  nombre: string;
+  costo: number;
+  precio: number;
+  categoria?: string;
+  stock?: number;
+  imagen?: string; 
+  descripcion_venta?: string;
+  registro_sanitario?: string;
+  laboratorio?: string;
+  principio_activo?: string;
+  principio_activo_id?: number;
+  presentacion?: string;
+}
+
+export interface SedeStore {
   id: string;
-  companyName: string;
+  nombre: string;
+  direccion: string;
+}
+
+export interface ClientConfig {
+  code: string;
   url: string;
   db: string;
   username: string;
+  apiKey: string;
+  companyFilter: string;
+  whatsappNumbers?: string;
+  isActive: boolean;
+  nombreComercial?: string;
+  logoUrl?: string;
+  colorPrimario?: string;
+  colorSecundario?: string;
+  colorAcento?: string;
+  showStore?: boolean;
+  storeCategories?: string;
+  tiendaCategoriaNombre?: string;
+  hiddenProducts?: number[];
+  hiddenCategories?: string[];
+  yapeNumber?: string;
+  yapeName?: string;
+  yapeQR?: string; 
+  plinNumber?: string;
+  plinName?: string;
+  plinQR?: string;
+  sedes_recojo?: SedeStore[];
+  campos_medicos_visibles?: string[];
+  footer_description?: string;
+  facebook_url?: string;
+  instagram_url?: string;
+  tiktok_url?: string;
+  quality_text?: string;
+  support_text?: string;
+}
+
+// Added OdooCredential to resolve import error in AdminPanel.tsx
+export interface OdooCredential {
+  id: string;
+  companyName: string;
+  friendlyName: string;
+  friendlyPassword?: string;
+  url: string;
+  db: string;
+  username: string;
+  apiKey: string;
   isActive: boolean;
   lastSync?: string;
+}
+
+export interface OdooSession {
+  url: string;
+  db: string;
+  username: string;
+  apiKey: string;
+  uid: number;
+  useProxy: boolean;
+  companyId?: number;
+  companyName?: string;
+}
+
+export interface CartItem {
+  producto: Producto;
+  cantidad: number;
+}
+
+export interface Venta {
+  fecha: Date;
+  sede: string;
+  compania: string;
+  vendedor: string;
+  sesion: string;
+  producto: string;
+  categoria: string;
+  metodoPago: string;
+  cantidad: number;
+  total: number;
+  costo: number;
+  margen: number;
+  margenPorcentaje: string;
+  cliente?: string;
+}
+
+export interface Filtros {
+  sedeSeleccionada: string;
+  companiaSeleccionada: string;
+  periodoSeleccionado: string;
+  fechaInicio: string;
+  fechaFin: string;
+}
+
+export interface AgrupadoPorDia {
+  fecha: string;
+  ventas: number;
+  margen: number;
 }
 
 export interface SalesSummary {
@@ -22,35 +130,4 @@ export interface SalesSummary {
   ordenes_totales: number;
   ticket_promedio: number;
   items_vendidos: number;
-}
-
-export interface ProductSold {
-  product_id: number;
-  nombre: string;
-  cantidad_vendida: number;
-  ventas_totales: number;
-  veces_vendido: number;
-  precio_promedio: number;
-}
-
-export interface MonthlyData {
-  mes: string;
-  ventas: number;
-  ordenes: number;
-  ticket_promedio: number;
-}
-
-export interface CategoryData {
-  nombre: string;
-  ventas: number;
-  cantidad: number;
-}
-
-export interface CustomerData {
-  cliente_id: number;
-  nombre: string;
-  ventas_totales: number;
-  ordenes: number;
-  ticket_promedio: number;
-  ultima_compra: string;
 }

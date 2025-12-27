@@ -1,97 +1,131 @@
 
 import React, { useState, useEffect } from 'react';
-import { UserRole, OdooCredential } from './types';
-import Sidebar from './components/Sidebar';
-import Header from './components/Header';
 import Dashboard from './components/Dashboard';
-import AdminPanel from './components/AdminPanel';
 import Login from './components/Login';
+import Layout from './components/Layout';
+import AdminDashboard from './components/AdminDashboard';
+import StoreView from './components/StoreView';
+import StoreSettings from './components/StoreSettings';
+import ProductManager from './components/ProductManager';
+import { OdooSession, ClientConfig } from './types';
+import { getClientByCode } from './services/clientManager';
+import { OdooClient } from './services/odoo';
+// Import Loader2 icon from lucide-react
+import { Loader2 } from 'lucide-react';
 
 const App: React.FC = () => {
-  const [user, setUser] = useState<{ role: UserRole; name: string } | null>(null);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'admin' | 'settings'>('dashboard');
-  const [selectedCredential, setSelectedCredential] = useState<OdooCredential | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [odooSession, setOdooSession] = useState<OdooSession | null>(null);
+  const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
+  const [currentView, setCurrentView] = useState('general');
+  const [isStoreMode, setIsStoreMode] = useState(false);
+  const [isStoreLoading, setIsStoreLoading] = useState(false);
 
-  // Simulated initial credentials for SuperAdmin
-  const [credentials, setCredentials] = useState<OdooCredential[]>([
-    {
-      id: '1',
-      companyName: 'Vida Factura Clic',
-      url: 'https://vida.facturaclic.pe',
-      db: 'vida_master',
-      username: 'soporte@facturaclic.pe',
-      isActive: true,
-      lastSync: '2023-11-20 10:30'
-    },
-    {
-      id: '3',
-      companyName: 'IGP Factura Clic',
-      url: 'https://igp.facturaclic.pe/',
-      db: 'igp_master',
-      username: 'soporte@facturaclic.pe',
-      isActive: true,
-      lastSync: 'Just now'
-    },
-    {
-      id: '2',
-      companyName: 'Restaurante El Gourmet',
-      url: 'https://gourmet.odoo.com',
-      db: 'gourmet_prod',
-      username: 'admin@gourmet.com',
-      isActive: false,
-      lastSync: '2023-10-15 08:00'
+  // Verificar modo tienda por URL
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const shopCode = params.get('shop');
+    if (shopCode) {
+      initStoreMode(shopCode.toUpperCase());
     }
-  ]);
+  }, []);
 
-  if (!user) {
-    return <Login onLogin={(role, name) => setUser({ role, name })} />;
+  const initStoreMode = async (code: string) => {
+    setIsStoreLoading(true);
+    const config = await getClientByCode(code);
+    if (config && config.isActive) {
+      setClientConfig(config);
+      try {
+        const client = new OdooClient(config.url, config.db, true);
+        const uid = await client.authenticate(config.username, config.apiKey);
+        if (uid) {
+          const companiesData: any[] = await client.searchRead(uid, config.apiKey, 'res.company', [], ['name']);
+          const found = config.companyFilter === 'ALL' ? companiesData[0] : companiesData.find(c => c.name.toUpperCase().includes(config.companyFilter.toUpperCase()));
+          
+          setOdooSession({
+            url: config.url,
+            db: config.db,
+            username: config.username,
+            apiKey: config.apiKey,
+            uid: uid,
+            useProxy: true,
+            companyId: found ? found.id : companiesData[0].id,
+            companyName: found ? found.name : companiesData[0].name
+          });
+          setIsStoreMode(true);
+        }
+      } catch (e) {
+        console.error("Store Auth Error", e);
+        alert("Error al conectar con la tienda. Intente más tarde.");
+      }
+    }
+    setIsStoreLoading(false);
+  };
+
+  const handleLogin = (session: OdooSession | null, config: ClientConfig) => {
+    setOdooSession(session);
+    setClientConfig(config);
+    setIsAdmin(false);
+    setIsAuthenticated(true);
+  };
+
+  const handleAdminLogin = () => {
+    setOdooSession(null);
+    setIsAdmin(true);
+    setIsAuthenticated(true);
+  }
+
+  const handleLogout = () => {
+    setOdooSession(null);
+    setClientConfig(null);
+    setIsAdmin(false);
+    setIsAuthenticated(false);
+    setIsStoreMode(false);
+    setCurrentView('general');
+    
+    // Safety wrap for pushState which can fail in sandboxed or blob-origin environments
+    try {
+      window.history.pushState({}, '', window.location.pathname);
+    } catch (e) {
+      console.warn("Could not update history state: restricted environment.");
+    }
+  };
+
+  if (isStoreLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center">
+        <Loader2 className="w-10 h-10 animate-spin text-brand-500 mb-4" />
+        <p className="font-bold text-slate-600 animate-pulse uppercase tracking-widest text-xs">Cargando Catálogo...</p>
+      </div>
+    );
+  }
+
+  if (isStoreMode && clientConfig && odooSession) {
+    return <StoreView session={odooSession} config={clientConfig} />;
+  }
+
+  if (!isAuthenticated) {
+    return <Login onLogin={handleLogin} onAdminLogin={handleAdminLogin} />;
+  }
+
+  if (isAdmin) {
+      return <AdminDashboard onLogout={handleLogout} />;
   }
 
   return (
-    <div className="flex h-screen bg-slate-50">
-      <Sidebar 
-        role={user.role} 
-        activeTab={activeTab} 
-        setActiveTab={setActiveTab} 
-        onLogout={() => setUser(null)}
-      />
-      
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <Header 
-          userName={user.name} 
-          role={user.role} 
-          activeTab={activeTab}
-        />
-        
-        <main className="flex-1 overflow-x-hidden overflow-y-auto p-4 md:p-6 lg:p-8">
-          {activeTab === 'dashboard' && (
-            <Dashboard 
-              credential={user.role === UserRole.COMPANY_USER ? credentials[0] : (selectedCredential || credentials[0])} 
-              credentials={credentials}
-              onSelectCredential={setSelectedCredential}
-              role={user.role}
-            />
-          )}
-          
-          {activeTab === 'admin' && user.role === UserRole.SUPERADMIN && (
-            <AdminPanel 
-              credentials={credentials} 
-              setCredentials={setCredentials} 
-            />
-          )}
-
-          {activeTab === 'settings' && (
-            <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-sm p-8 border border-slate-200">
-               <h2 className="text-2xl font-bold mb-6">Configuración de Usuario</h2>
-               <p className="text-slate-600 mb-4">Cuenta: {user.name}</p>
-               <p className="text-slate-600 mb-4">Rol: {user.role}</p>
-               <div className="pt-6 border-t border-slate-100">
-                  <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">Cambiar Contraseña</button>
-               </div>
-            </div>
-          )}
-        </main>
-      </div>
+    <div className="antialiased text-slate-800 bg-slate-50 min-h-screen">
+      <Layout onLogout={handleLogout} currentView={currentView} onNavigate={setCurrentView} showStoreLink={clientConfig?.showStore}>
+        {currentView === 'store' && odooSession && clientConfig ? (
+           <StoreView session={odooSession} config={clientConfig} onBack={() => setCurrentView('general')} />
+        ) : currentView === 'product-manager' && odooSession && clientConfig ? (
+           <ProductManager session={odooSession} config={clientConfig} onUpdate={setClientConfig} />
+        ) : currentView === 'store-config' && clientConfig ? (
+           <StoreSettings config={clientConfig} onUpdate={setClientConfig} />
+        ) : (
+          <Dashboard session={odooSession} view={currentView} />
+        )}
+      </Layout>
     </div>
   );
 };

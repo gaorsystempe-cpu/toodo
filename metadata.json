@@ -1,7 +1,5 @@
 {
-  "name": "Odoo Profitability SaaS Hub",
-  "description": "A professional SaaS dashboard for managing Odoo database connections and visualizing sales, profitability, and customer insights with AI-powered analytics.",
-  "requestFramePermissions": [
-    "geolocation"
-  ]
+  "name": "tOdoo Sales Analytics",
+  "description": "A comprehensive sales dashboard simulating Odoo integration with real-time analytics, filtering, and data visualization.",
+  "requestFramePermissions": []
 }
