@@ -1,0 +1,7 @@
+{
+  "name": "Odoo Profitability SaaS Hub",
+  "description": "A professional SaaS dashboard for managing Odoo database connections and visualizing sales, profitability, and customer insights with AI-powered analytics.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
