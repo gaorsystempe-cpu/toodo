@@ -113,14 +113,7 @@ export interface SalesSummary {
   items_vendidos: number;
 }
 
-// Added UserRole enum to resolve import errors in Sidebar.tsx and Header.tsx
-export enum UserRole {
-  SUPERADMIN = 'SUPERADMIN',
-  ADMIN = 'ADMIN',
-  USER = 'USER'
-}
-
-// Added OdooCredential interface to resolve import error in AdminPanel.tsx
+// Interface for Odoo credentials used in management panels
 export interface OdooCredential {
   id: string;
   companyName: string;
@@ -132,4 +125,10 @@ export interface OdooCredential {
   apiKey: string;
   isActive: boolean;
   lastSync?: string;
+}
+
+export enum UserRole {
+  SUPERADMIN = 'SUPERADMIN',
+  ADMIN = 'ADMIN',
+  USER = 'USER'
 }

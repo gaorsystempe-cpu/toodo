@@ -49,11 +49,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
 
         setIsGeneratingPalette(true);
         try {
-            // Acceso directo a la variable de entorno
-            const apiKey = process.env.API_KEY || '';
-            if (!apiKey) throw new Error("API_KEY no configurada.");
-
-            const ai = new GoogleGenAI({ apiKey });
+            // Directly using process.env.API_KEY to initialize GoogleGenAI as per guidelines
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
             const response = await ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
                 contents: `Analiza visualmente la marca '${currentClient.nombreComercial || currentClient.code}' basándote en su logo (${currentClient.logoUrl}). Sugiere una paleta de 3 colores hexadecimales que armonicen con el logo y una breve descripción de marca para el footer. Responde estrictamente en JSON.`,
@@ -72,6 +69,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
                 }
             });
 
+            // Using the .text property directly instead of text() method
             const text = response.text;
             if (!text) throw new Error("La IA no devolvió contenido.");
             
