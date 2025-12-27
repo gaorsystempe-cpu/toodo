@@ -66,11 +66,11 @@ export class OdooClient {
   private db: string;
   private useProxy: boolean;
   
-  // Lista de proxies para rotación en caso de 403/bloqueo
+  // Lista de proxies optimizada para peticiones POST con body
   private proxies = [
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
   ];
 
   constructor(url: string, db: string, useProxy: boolean = false) {
@@ -80,59 +80,64 @@ export class OdooClient {
   }
 
   private async rpcCall(endpoint: string, method: string, params: any[]) {
-    const xml = `<?xml version="1.0"?>
-<methodCall>
-  <methodName>${method}</methodName>
-  <params>
-    ${params.map(p => `<param><value>${serialize(p)}</value></param>`).join('')}
-  </params>
-</methodCall>`;
+    // IMPORTANTE: El XML debe empezar sin espacios ni saltos de línea para evitar el error de Odoo
+    const xml = `<?xml version="1.0"?><methodCall><methodName>${method}</methodName><params>${params.map(p => `<param><value>${serialize(p)}</value></param>`).join('')}</params></methodCall>`;
 
     const targetUrl = `${this.url}/xmlrpc/2/${endpoint}`;
     let lastError: any = null;
 
-    // Si no usamos proxy, intento directo
     if (!this.useProxy) {
       return this.executeFetch(targetUrl, xml);
     }
 
-    // Intentar con la lista de proxies si el primero falla (estrategia de reintento para 403)
     for (const proxyFn of this.proxies) {
       try {
         const fetchUrl = proxyFn(targetUrl);
+        console.log(`Intentando conexión vía: ${fetchUrl.split('?')[0]}`);
         return await this.executeFetch(fetchUrl, xml);
       } catch (error: any) {
         lastError = error;
-        console.warn(`Proxy fallido, intentando siguiente...`, error.message);
-        // Si es un error de Odoo Fault, no reintentamos con otro proxy, el error es lógico
+        // Si es un error de Odoo (Fault), el proxy funcionó pero la lógica falló, no reintentamos
         if (error.message.includes('Fallo de Odoo')) throw error;
+        console.warn(`Proxy falló: ${error.message}`);
         continue; 
       }
     }
 
-    throw lastError || new Error("Todos los métodos de conexión fallaron.");
+    throw lastError || new Error("No se pudo establecer conexión con Odoo a través de ningún proxy.");
   }
 
   private async executeFetch(url: string, xml: string) {
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'text/xml',
+        'Content-Type': 'text/xml; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest'
       },
       body: xml
     });
 
     if (!response.ok) {
       if (response.status === 403) {
-        throw new Error(`Error HTTP 403: Acceso denegado por el servidor u Odoo WAF.`);
+        throw new Error(`Error HTTP 403: El servidor Odoo o el Proxy denegó el acceso.`);
       }
       throw new Error(`Error HTTP: ${response.status} ${response.statusText}`);
     }
 
     const text = await response.text();
+    if (!text || text.trim().length === 0) {
+      throw new Error("El servidor devolvió una respuesta vacía.");
+    }
+
     const parser = new DOMParser();
     const doc = parser.parseFromString(text, 'text/xml');
     
+    // Verificar si el XML es válido
+    const parserError = doc.querySelector('parsererror');
+    if (parserError) {
+      throw new Error("La respuesta del servidor no es un XML válido.");
+    }
+
     const fault = doc.querySelector('fault');
     if (fault) {
       const faultStruct = parseValue(fault.querySelector('value')!);
@@ -140,14 +145,14 @@ export class OdooClient {
     }
 
     const paramNode = doc.querySelector('params param value');
-    if (!paramNode) throw new Error('Respuesta XML-RPC inválida o vacía.');
+    if (!paramNode) throw new Error('Respuesta XML-RPC sin datos de retorno.');
     
     return parseValue(paramNode);
   }
 
   async authenticate(username: string, apiKey: string): Promise<number> {
     const uid = await this.rpcCall('common', 'authenticate', [this.db, username, apiKey, {}]);
-    if (!uid) throw new Error("Fallo en la autenticación: Credenciales incorrectas.");
+    if (!uid) throw new Error("Credenciales de Odoo incorrectas.");
     return uid;
   }
 
