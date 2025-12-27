@@ -1,3 +1,4 @@
+
 // Utility to escape XML special characters
 const xmlEscape = (str: string) => 
   str.replace(/&/g, '&amp;')
@@ -65,6 +66,13 @@ export class OdooClient {
   private db: string;
   private useProxy: boolean;
   
+  // Lista de proxies para rotación en caso de 403/bloqueo
+  private proxies = [
+    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+  ];
+
   constructor(url: string, db: string, useProxy: boolean = false) {
     this.url = url.replace(/\/+$/, ''); 
     this.db = db;
@@ -81,47 +89,65 @@ export class OdooClient {
 </methodCall>`;
 
     const targetUrl = `${this.url}/xmlrpc/2/${endpoint}`;
-    // Usamos un proxy para evitar bloqueos por CORS en llamadas directas desde el navegador
-    const fetchUrl = this.useProxy 
-      ? `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`
-      : targetUrl;
+    let lastError: any = null;
 
-    try {
-        const response = await fetch(fetchUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'text/xml',
-            },
-            body: xml
-        });
-
-        if (!response.ok) {
-            throw new Error(`Error HTTP: ${response.status}`);
-        }
-
-        const text = await response.text();
-        const parser = new DOMParser();
-        const doc = parser.parseFromString(text, 'text/xml');
-        
-        const fault = doc.querySelector('fault');
-        if (fault) {
-            const faultStruct = parseValue(fault.querySelector('value')!);
-            throw new Error(`Fallo de Odoo: ${faultStruct.faultString} (${faultStruct.faultCode})`);
-        }
-
-        const paramNode = doc.querySelector('params param value');
-        if (!paramNode) throw new Error('Respuesta XML-RPC inválida');
-        
-        return parseValue(paramNode);
-    } catch (error: any) {
-        console.error("Error en llamada RPC:", error);
-        throw error;
+    // Si no usamos proxy, intento directo
+    if (!this.useProxy) {
+      return this.executeFetch(targetUrl, xml);
     }
+
+    // Intentar con la lista de proxies si el primero falla (estrategia de reintento para 403)
+    for (const proxyFn of this.proxies) {
+      try {
+        const fetchUrl = proxyFn(targetUrl);
+        return await this.executeFetch(fetchUrl, xml);
+      } catch (error: any) {
+        lastError = error;
+        console.warn(`Proxy fallido, intentando siguiente...`, error.message);
+        // Si es un error de Odoo Fault, no reintentamos con otro proxy, el error es lógico
+        if (error.message.includes('Fallo de Odoo')) throw error;
+        continue; 
+      }
+    }
+
+    throw lastError || new Error("Todos los métodos de conexión fallaron.");
+  }
+
+  private async executeFetch(url: string, xml: string) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml',
+      },
+      body: xml
+    });
+
+    if (!response.ok) {
+      if (response.status === 403) {
+        throw new Error(`Error HTTP 403: Acceso denegado por el servidor u Odoo WAF.`);
+      }
+      throw new Error(`Error HTTP: ${response.status} ${response.statusText}`);
+    }
+
+    const text = await response.text();
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(text, 'text/xml');
+    
+    const fault = doc.querySelector('fault');
+    if (fault) {
+      const faultStruct = parseValue(fault.querySelector('value')!);
+      throw new Error(`Fallo de Odoo: ${faultStruct.faultString} (${faultStruct.faultCode})`);
+    }
+
+    const paramNode = doc.querySelector('params param value');
+    if (!paramNode) throw new Error('Respuesta XML-RPC inválida o vacía.');
+    
+    return parseValue(paramNode);
   }
 
   async authenticate(username: string, apiKey: string): Promise<number> {
     const uid = await this.rpcCall('common', 'authenticate', [this.db, username, apiKey, {}]);
-    if (!uid) throw new Error("Fallo en la autenticación");
+    if (!uid) throw new Error("Fallo en la autenticación: Credenciales incorrectas.");
     return uid;
   }
 
