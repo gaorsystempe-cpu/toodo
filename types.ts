@@ -67,7 +67,6 @@ export interface OdooSession {
   companyName?: string;
 }
 
-// Fixed error: Missing interface OdooCredential required by AdminPanel.tsx
 export interface OdooCredential {
   id: string;
   companyName: string;

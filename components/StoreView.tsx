@@ -47,7 +47,8 @@ const StoreView: React.FC<StoreViewProps> = ({ session, config, onBack }) => {
   const fetchProducts = async () => {
     if (!session) return;
     setLoading(true);
-    const client = new OdooClient(session.url, session.db, true);
+    // Fix line 50: constructor expects 2 arguments
+    const client = new OdooClient(session.url, session.db);
     const context = session.companyId ? { allowed_company_ids: [session.companyId], company_id: session.companyId } : {};
 
     const coreFields = ['display_name', 'list_price', 'categ_id', 'image_128', 'description_sale'];

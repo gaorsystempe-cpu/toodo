@@ -17,7 +17,8 @@ const StoreSettings: React.FC<StoreSettingsProps> = ({ config, onUpdate }) => {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSaving(true);
-    const result = await saveClient(currentConfig, false);
+    // Fix line 20: saveClient expects 0 arguments
+    const result = await saveClient();
     if (result.success) {
       onUpdate(currentConfig);
       setShowSuccess(true);

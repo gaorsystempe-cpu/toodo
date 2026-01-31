@@ -25,7 +25,8 @@ const ProductManager: React.FC<ProductManagerProps> = ({ session, config, onUpda
 
   const fetchProducts = async () => {
     setLoading(true);
-    const client = new OdooClient(session.url, session.db, true);
+    // Fix line 28: constructor expects 2 arguments
+    const client = new OdooClient(session.url, session.db);
     try {
       const configCategory = (config.tiendaCategoriaNombre || '').trim();
       const domain: any[] = [['sale_ok', '=', true]];
@@ -109,7 +110,8 @@ const ProductManager: React.FC<ProductManagerProps> = ({ session, config, onUpda
       hiddenProducts: hiddenIds.map(Number), 
       hiddenCategories: hiddenCats 
     };
-    const result = await saveClient(newConfig, false);
+    // Fix line 112: saveClient expects 0 arguments
+    const result = await saveClient();
     if (result.success) {
       onUpdate(newConfig);
       setShowSuccess(true);

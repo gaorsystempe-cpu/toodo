@@ -37,7 +37,8 @@ const App: React.FC = () => {
     if (config && config.isActive) {
       setClientConfig(config);
       try {
-        const client = new OdooClient(config.url, config.db, true);
+        // Fix line 40: constructor expects 2 arguments
+        const client = new OdooClient(config.url, config.db);
         const uid = await client.authenticate(config.username, config.apiKey);
         if (uid) {
           const companiesData: any[] = await client.searchRead(uid, config.apiKey, 'res.company', [], ['name']);
