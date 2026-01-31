@@ -49,16 +49,19 @@ export class OdooClient {
   private url: string;
   private db: string;
   
-  // Proxies para evitar CORS y "Failed to fetch"
+  // Proxies mejorados para Vercel
   private proxies = [
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
+    (url: string) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+    (url: string) => url, // Directo como último recurso
   ];
 
   constructor(url: string, db: string) {
-    this.url = url.replace(/\/+$/, ''); 
-    this.db = db;
+    this.url = url.trim().replace(/\/+$/, ''); 
+    if (!this.url.startsWith('http')) {
+        this.url = 'https://' + this.url;
+    }
+    this.db = db.trim();
   }
 
   private async rpcCall(endpoint: string, method: string, params: any[]) {
@@ -71,49 +74,42 @@ export class OdooClient {
     const targetUrl = `${this.url}/xmlrpc/2/${endpoint}`;
     let lastError: any = null;
 
-    // Intentar con cada proxy disponible de forma secuencial
     for (const proxyFn of this.proxies) {
       try {
         const fetchUrl = proxyFn(targetUrl);
         return await this.executeFetch(fetchUrl, xml);
       } catch (error: any) {
         lastError = error;
-        console.warn(`Proxy fallido, intentando el siguiente...`, error.message);
+        if (error.message.includes('Error de Odoo:')) throw error;
+        console.warn(`Proxy fallido, intentando siguiente...`, error.message);
         continue; 
       }
     }
-    throw lastError || new Error("No se pudo establecer conexión segura con el servidor de Odoo tras varios intentos.");
+
+    throw new Error(`Error de conexión con Odoo: ${lastError?.message || 'CORS o Red bloqueada'}. Verifique que el servidor Odoo acepte conexiones XML-RPC.`);
   }
 
   private async executeFetch(url: string, xml: string) {
-    const encoder = new TextEncoder();
-    const bodyBuffer = encoder.encode(xml);
-
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'text/xml; charset=UTF-8',
-        'Accept': 'text/xml'
-      },
-      body: bodyBuffer
+      headers: { 'Content-Type': 'text/xml' },
+      body: xml
     });
 
-    if (!response.ok) {
-      throw new Error(`Servidor Odoo inaccesible (HTTP ${response.status})`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     const text = await response.text();
-    if (!text || text.trim().length === 0) throw new Error("Respuesta vacía del servidor.");
+    if (!text) throw new Error("Respuesta vacía");
 
     const parser = new DOMParser();
     const doc = parser.parseFromString(text, 'text/xml');
     
-    if (doc.querySelector('parsererror')) throw new Error("Error en formato de respuesta XML.");
+    if (doc.querySelector('parsererror')) throw new Error("XML inválido");
 
     const fault = doc.querySelector('fault');
     if (fault) {
       const faultValue = fault.querySelector('value');
-      const faultStruct = faultValue ? parseValue(faultValue) : { faultString: 'Error desconocido de Odoo' };
+      const faultStruct = faultValue ? parseValue(faultValue) : { faultString: 'Error desconocido' };
       throw new Error(`Error de Odoo: ${faultStruct.faultString}`);
     }
 
@@ -123,7 +119,9 @@ export class OdooClient {
 
   async authenticate(username: string, apiKey: string): Promise<number> {
     const uid = await this.rpcCall('common', 'authenticate', [this.db, username, apiKey, {}]);
-    if (uid === false || typeof uid !== 'number') throw new Error("Autenticación fallida. Verifique sus credenciales.");
+    if (uid === false || typeof uid !== 'number') {
+        throw new Error("Credenciales inválidas para la DB " + this.db);
+    }
     return uid;
   }
 
