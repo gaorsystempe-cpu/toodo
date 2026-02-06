@@ -6,7 +6,7 @@ import {
 import { 
   TrendingUp, RefreshCw, AlertCircle, FileSpreadsheet, 
   Zap, Calculator, CreditCard, LayoutGrid, ClipboardList,
-  Store, MapPin, ArrowUpRight, Package, History, Info, Plus
+  Store, MapPin, ArrowUpRight, Package, History, Info, Plus, Loader2
 } from 'lucide-react';
 import { Venta, OdooSession } from '../types';
 import { OdooClient } from '../services/odoo';
@@ -28,6 +28,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
   const [error, setError] = useState<string | null>(null);
   const [filterMode, setFilterMode] = useState<FilterMode>('hoy');
   const [activeTab, setActiveTab] = useState<ReportTab>('consolidado');
+  const [syncProgress, setSyncProgress] = useState('');
   const [dateRange, setDateRange] = useState({
       start: new Date().toLocaleDateString('en-CA'),
       end: new Date().toLocaleDateString('en-CA')
@@ -56,41 +57,54 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
       if (!session) return;
       setLoading(true);
       setError(null);
+      setSyncProgress('Iniciando conexión...');
 
       try {
           const client = new OdooClient(session.url, session.db);
+          
+          // 1. Obtener Pedidos (Cabeceras)
+          setSyncProgress('Buscando pedidos...');
           const domain: any[] = [
-            ['state', '!=', 'cancel'], 
+            ['state', 'in', ['paid', 'done', 'invoiced']], 
             ['date_order', '>=', `${dateRange.start} 00:00:00`],
             ['date_order', '<=', `${dateRange.end} 23:59:59`]
           ];
           if (session.companyId) domain.push(['company_id', '=', session.companyId]);
 
           const orders = await client.searchRead(session.uid, session.apiKey, 'pos.order', domain, 
-            ['date_order', 'config_id', 'lines', 'company_id', 'amount_total', 'user_id', 'payment_ids'], 
-            { order: 'date_order desc' }
+            ['date_order', 'config_id', 'lines', 'amount_total', 'user_id', 'payment_ids'], 
+            { order: 'date_order desc', limit: 1000 }
           );
 
           if (!orders || orders.length === 0) {
               setVentasData([]);
+              setSyncProgress('Sin datos en este rango');
+              setLoading(false);
               return;
           }
 
+          // 2. Obtener Líneas y Pagos en paralelo para ahorrar tiempo
+          setSyncProgress(`Procesando ${orders.length} pedidos...`);
           const allLineIds = orders.flatMap((o: any) => o.lines || []);
           const allPaymentIds = orders.flatMap((o: any) => o.payment_ids || []);
 
           const [linesData, paymentsData] = await Promise.all([
             client.searchRead(session.uid, session.apiKey, 'pos.order.line', [['id', 'in', allLineIds]], 
-                ['product_id', 'qty', 'price_subtotal_incl', 'price_unit', 'order_id']),
+                ['product_id', 'qty', 'price_subtotal', 'price_subtotal_incl', 'order_id', 'purchase_price']),
             client.searchRead(session.uid, session.apiKey, 'pos.payment', [['id', 'in', allPaymentIds]], 
                 ['payment_method_id', 'amount', 'pos_order_id'])
           ]);
 
+          // 3. Obtener Costos de Productos (Solo si las líneas no traen purchase_price)
+          setSyncProgress('Sincronizando costos...');
           const productIds = Array.from(new Set(linesData.map((l: any) => l.product_id[0])));
           const products = await client.searchRead(session.uid, session.apiKey, 'product.product', [['id', 'in', productIds]], ['standard_price', 'categ_id']);
           
-          const productMap = new Map<number, { cost: number; cat: string }>(products.map((p: any) => [p.id, { cost: p.standard_price || 0, cat: p.categ_id[1] }]));
+          const productMap = new Map<number, { cost: number; cat: string }>(
+            products.map((p: any) => [p.id, { cost: p.standard_price || 0, cat: p.categ_id ? p.categ_id[1] : 'Sin Categoría' }])
+          );
           
+          // Organizar pagos por pedido
           const paymentsByOrder = new Map();
           paymentsData.forEach((p: any) => {
               const oId = p.pos_order_id[0];
@@ -98,6 +112,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               paymentsByOrder.get(oId).push(p.payment_method_id[1]);
           });
 
+          // Organizar líneas por pedido
           const linesByOrder = new Map();
           linesData.forEach((l: any) => {
               const oId = l.order_id[0];
@@ -105,6 +120,8 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               linesByOrder.get(oId).push(l);
           });
 
+          // 4. Mapeo final con cálculo de rentabilidad real
+          setSyncProgress('Calculando rentabilidad...');
           const mapped: Venta[] = orders.flatMap((o: any) => {
               const orderLines = linesByOrder.get(o.id) || [];
               const orderDate = new Date(o.date_order.replace(' ', 'T') + 'Z');
@@ -115,31 +132,41 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               return orderLines.map((l: any) => {
                   const pId = l.product_id[0];
                   const pInfo = productMap.get(pId) || { cost: 0, cat: 'Varios' };
-                  const total = l.price_subtotal_incl || 0;
-                  const costo = pInfo.cost * l.qty;
-                  const margen = total - costo;
+                  
+                  // IMPORTANTE: El margen se calcula sobre el precio SIN impuestos (price_subtotal)
+                  // para obtener la rentabilidad real del negocio.
+                  const ventaConImpuesto = l.price_subtotal_incl || 0;
+                  const ventaBase = l.price_subtotal || 0;
+                  
+                  // Priorizar purchase_price de la línea si existe (módulo de margen de Odoo)
+                  const costoUnitario = l.purchase_price || pInfo.cost;
+                  const costoTotal = costoUnitario * l.qty;
+                  
+                  const margenNeto = ventaBase - costoTotal;
 
                   return {
                       fecha: orderDate,
                       sede,
                       compania: session.companyName || '',
-                      vendedor: o.user_id[1] || 'Vendedor',
+                      vendedor: o.user_id[1] || 'Sistema',
                       producto: l.product_id[1],
                       categoria: pInfo.cat,
-                      total,
-                      costo,
-                      margen,
+                      total: ventaConImpuesto, // Lo que el cliente pagó
+                      costo: costoTotal,
+                      margen: margenNeto,
                       cantidad: l.qty,
                       sesion: '', 
                       metodoPago: metodoPrincipal,
-                      margenPorcentaje: total > 0 ? ((margen/total)*100).toFixed(1) : '100.0'
+                      margenPorcentaje: ventaBase > 0 ? ((margenNeto / ventaBase) * 100).toFixed(1) : '0.0'
                   };
               });
           });
 
           setVentasData(mapped);
+          setSyncProgress('Sincronización completa');
       } catch (err: any) {
-          setError(err.message);
+          console.error("Fetch Error:", err);
+          setError(`Error Odoo: ${err.message}`);
       } finally {
           setLoading(false);
       }
@@ -200,12 +227,11 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
   const exportExcel = () => {
     const wb = XLSX.utils.book_new();
 
-    // 1. Hoja Consolidado
     const summaryData = [
       ["REPORTE CONSOLIDADO DE RENTABILIDAD"],
       ["Rango de Fechas:", `${dateRange.start} al ${dateRange.end}`],
       [],
-      ["Sede", "Venta Total", "Costo de Servicio", "Ganancia Neta", "Rentabilidad %"]
+      ["Sede", "Venta Total (Inc. IGV)", "Costo de Servicio", "Ganancia Neta (Base)", "Rentabilidad %"]
     ];
 
     const rc = resumenSedes.recepcion;
@@ -222,7 +248,6 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
     const wsSum = XLSX.utils.aoa_to_sheet(summaryData);
     XLSX.utils.book_append_sheet(wb, wsSum, "Resumen Consolidado");
 
-    // Función para crear hoja de detalle por sede
     const createSedeSheet = (data: Venta[], sheetName: string) => {
       const rows = data.map(v => ({
         Fecha: v.fecha.toLocaleString('es-PE'),
@@ -236,7 +261,6 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
       
-      // Añadir totales al final
       const totalV = data.reduce((s, x) => s + x.total, 0);
       const totalC = data.reduce((s, x) => s + x.costo, 0);
       const totalG = data.reduce((s, x) => s + x.margen, 0);
@@ -257,7 +281,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
       XLSX.utils.book_append_sheet(wb, createSedeSheet(dataFeetSurco, "Surco"), "Detalle FeetSurco");
     }
 
-    XLSX.writeFile(wb, `Reporte_Rentabilidad_Sedes_${dateRange.start}.xlsx`);
+    XLSX.writeFile(wb, `Reporte_Rentabilidad_${dateRange.start}.xlsx`);
   };
 
   return (
@@ -270,13 +294,25 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
              <div className="p-3 bg-brand-500 rounded-2xl shadow-lg shadow-brand-500/20"><TrendingUp className="text-white w-6 h-6" /></div>
              <h1 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tighter uppercase italic">Control de Rentabilidad</h1>
            </div>
-           <p className="text-slate-500 text-sm mt-2 font-medium">Análisis de Sedes: FeetCare & Feet Surco</p>
+           <p className="text-slate-500 text-sm mt-2 font-medium flex items-center gap-2">
+             Análisis de Sedes: FeetCare & Feet Surco 
+             {loading && <span className="flex items-center gap-2 text-brand-600 animate-pulse ml-4 font-black text-xs uppercase"><Loader2 className="w-3 h-3 animate-spin"/> {syncProgress}</span>}
+           </p>
         </div>
         <div className="flex gap-3 w-full md:w-auto">
-           <button onClick={fetchData} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-white px-6 py-3.5 rounded-2xl border border-slate-200 font-bold text-[10px] hover:bg-slate-50 transition-all uppercase tracking-widest"><RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Sincronizar</button>
+           <button onClick={fetchData} disabled={loading} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-white px-6 py-3.5 rounded-2xl border border-slate-200 font-bold text-[10px] hover:bg-slate-50 transition-all uppercase tracking-widest disabled:opacity-50">
+             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-brand-500' : ''}`} /> Sincronizar
+           </button>
            <button onClick={exportExcel} className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-slate-900 text-white px-6 py-3.5 rounded-2xl font-bold text-[10px] shadow-xl hover:bg-slate-800 transition-all uppercase tracking-widest"><FileSpreadsheet className="w-4 h-4" /> Exportar Excel</button>
         </div>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-100 p-6 rounded-[2rem] flex items-center gap-4 text-red-600 animate-bounce">
+          <AlertCircle className="w-6 h-6" />
+          <p className="font-black text-xs uppercase tracking-widest">{error}</p>
+        </div>
+      )}
 
       {/* NAVEGACIÓN DE 3 PESTAÑAS (TABS) */}
       <div className="bg-slate-100 p-2 rounded-[2.8rem] border border-slate-200 flex flex-wrap gap-2 w-full lg:w-fit">
@@ -409,15 +445,15 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
            {/* KPIs Específicos de la Sede */}
            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Venta Sede</p>
+                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Venta Sede (Final)</p>
                  <h3 className="text-3xl font-black text-slate-900 tracking-tighter">S/ {kpis.totalVenta.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
               </div>
               <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Costo Sede</p>
+                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Costo Operativo</p>
                  <h3 className="text-3xl font-black text-slate-400 tracking-tighter">S/ {kpis.totalCosto.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
               </div>
               <div className={`p-8 rounded-[2.5rem] text-white shadow-xl ${activeTab === 'recepcion' ? 'bg-brand-500' : 'bg-blue-500'}`}>
-                 <p className="text-white/70 text-[10px] font-black uppercase tracking-widest mb-1">Ganancia Sede</p>
+                 <p className="text-white/70 text-[10px] font-black uppercase tracking-widest mb-1">Utilidad Bruta</p>
                  <h3 className="text-3xl font-black tracking-tighter">S/ {kpis.totalMargen.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
               </div>
            </div>
@@ -440,7 +476,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
                           <th className="px-10 py-7">Fecha / Atención</th>
                           <th className="px-10 py-7">Servicio / Producto</th>
                           <th className="px-10 py-7">Método de Pago</th>
-                          <th className="px-10 py-7 text-right">Monto Venta</th>
+                          <th className="px-10 py-7 text-right">Venta Final</th>
                           <th className="px-10 py-7 text-right">Costo</th>
                           <th className="px-10 py-7 text-right">Ganancia</th>
                           <th className="px-10 py-7 text-center">Rent. %</th>
