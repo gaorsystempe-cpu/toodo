@@ -57,12 +57,12 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
       if (!session) return;
       setLoading(true);
       setError(null);
-      setSyncProgress('Iniciando conexión...');
+      setSyncProgress('Conectando...');
 
       try {
           const client = new OdooClient(session.url, session.db);
           
-          // 1. Obtener Pedidos (Cabeceras)
+          // 1. Obtener Pedidos (Cabeceras) - Solo campos esenciales para velocidad
           setSyncProgress('Buscando pedidos...');
           const domain: any[] = [
             ['state', 'in', ['paid', 'done', 'invoiced']], 
@@ -78,33 +78,35 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
 
           if (!orders || orders.length === 0) {
               setVentasData([]);
-              setSyncProgress('Sin datos en este rango');
+              setSyncProgress('Sin datos');
               setLoading(false);
               return;
           }
 
-          // 2. Obtener Líneas y Pagos en paralelo para ahorrar tiempo
-          setSyncProgress(`Procesando ${orders.length} pedidos...`);
+          // 2. Obtener Líneas y Pagos
+          setSyncProgress(`Analizando ${orders.length} órdenes...`);
           const allLineIds = orders.flatMap((o: any) => o.lines || []);
           const allPaymentIds = orders.flatMap((o: any) => o.payment_ids || []);
 
+          // Eliminado 'purchase_price' de linesData para evitar el ValueError
           const [linesData, paymentsData] = await Promise.all([
             client.searchRead(session.uid, session.apiKey, 'pos.order.line', [['id', 'in', allLineIds]], 
-                ['product_id', 'qty', 'price_subtotal', 'price_subtotal_incl', 'order_id', 'purchase_price']),
+                ['product_id', 'qty', 'price_subtotal', 'price_subtotal_incl', 'order_id']),
             client.searchRead(session.uid, session.apiKey, 'pos.payment', [['id', 'in', allPaymentIds]], 
                 ['payment_method_id', 'amount', 'pos_order_id'])
           ]);
 
-          // 3. Obtener Costos de Productos (Solo si las líneas no traen purchase_price)
-          setSyncProgress('Sincronizando costos...');
+          // 3. Obtener Costos Reales de Productos (standard_price es el campo universal de costo)
+          setSyncProgress('Calculando costos...');
           const productIds = Array.from(new Set(linesData.map((l: any) => l.product_id[0])));
+          
+          // Consultamos el costo directamente de la ficha técnica del producto
           const products = await client.searchRead(session.uid, session.apiKey, 'product.product', [['id', 'in', productIds]], ['standard_price', 'categ_id']);
           
           const productMap = new Map<number, { cost: number; cat: string }>(
-            products.map((p: any) => [p.id, { cost: p.standard_price || 0, cat: p.categ_id ? p.categ_id[1] : 'Sin Categoría' }])
+            products.map((p: any) => [p.id, { cost: p.standard_price || 0, cat: p.categ_id ? p.categ_id[1] : 'General' }])
           );
           
-          // Organizar pagos por pedido
           const paymentsByOrder = new Map();
           paymentsData.forEach((p: any) => {
               const oId = p.pos_order_id[0];
@@ -112,7 +114,6 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               paymentsByOrder.get(oId).push(p.payment_method_id[1]);
           });
 
-          // Organizar líneas por pedido
           const linesByOrder = new Map();
           linesData.forEach((l: any) => {
               const oId = l.order_id[0];
@@ -120,26 +121,23 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               linesByOrder.get(oId).push(l);
           });
 
-          // 4. Mapeo final con cálculo de rentabilidad real
-          setSyncProgress('Calculando rentabilidad...');
+          // 4. Mapeo y Cálculo de Rentabilidad
+          setSyncProgress('Generando reporte...');
           const mapped: Venta[] = orders.flatMap((o: any) => {
               const orderLines = linesByOrder.get(o.id) || [];
               const orderDate = new Date(o.date_order.replace(' ', 'T') + 'Z');
-              const sede = o.config_id[1] || 'Caja Central';
-              const metodos = paymentsByOrder.get(o.id) || ['Efectivo'];
+              const sede = o.config_id[1] || 'Caja';
+              const metodos = paymentsByOrder.get(o.id) || ['Otros'];
               const metodoPrincipal = metodos[0];
 
               return orderLines.map((l: any) => {
                   const pId = l.product_id[0];
                   const pInfo = productMap.get(pId) || { cost: 0, cat: 'Varios' };
                   
-                  // IMPORTANTE: El margen se calcula sobre el precio SIN impuestos (price_subtotal)
-                  // para obtener la rentabilidad real del negocio.
                   const ventaConImpuesto = l.price_subtotal_incl || 0;
-                  const ventaBase = l.price_subtotal || 0;
+                  const ventaBase = l.price_subtotal || 0; // Ganancia se calcula sobre base imponible
                   
-                  // Priorizar purchase_price de la línea si existe (módulo de margen de Odoo)
-                  const costoUnitario = l.purchase_price || pInfo.cost;
+                  const costoUnitario = pInfo.cost; 
                   const costoTotal = costoUnitario * l.qty;
                   
                   const margenNeto = ventaBase - costoTotal;
@@ -148,10 +146,10 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
                       fecha: orderDate,
                       sede,
                       compania: session.companyName || '',
-                      vendedor: o.user_id[1] || 'Sistema',
+                      vendedor: o.user_id[1] || 'Usuario',
                       producto: l.product_id[1],
                       categoria: pInfo.cat,
-                      total: ventaConImpuesto, // Lo que el cliente pagó
+                      total: ventaConImpuesto, 
                       costo: costoTotal,
                       margen: margenNeto,
                       cantidad: l.qty,
@@ -163,10 +161,10 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
           });
 
           setVentasData(mapped);
-          setSyncProgress('Sincronización completa');
+          setSyncProgress('¡Sincronizado!');
       } catch (err: any) {
-          console.error("Fetch Error:", err);
-          setError(`Error Odoo: ${err.message}`);
+          console.error("Dashboard Error:", err);
+          setError(`No se pudo sincronizar: El servidor de Odoo tardó demasiado o la configuración de campos es distinta.`);
       } finally {
           setLoading(false);
       }
@@ -174,7 +172,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // FILTRADO ESTRICTO DE SEDES
+  // FILTRADO DE SEDES
   const dataFeetCare = useMemo(() => ventasData.filter(v => v.sede.toUpperCase().includes('FEETCARE') || (v.sede.toUpperCase().includes('RECEPCION') && !v.sede.toUpperCase().includes('SURCO'))), [ventasData]);
   const dataFeetSurco = useMemo(() => ventasData.filter(v => v.sede.toUpperCase().includes('SURCO')), [ventasData]);
 
@@ -226,68 +224,24 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
 
   const exportExcel = () => {
     const wb = XLSX.utils.book_new();
-
     const summaryData = [
-      ["REPORTE CONSOLIDADO DE RENTABILIDAD"],
-      ["Rango de Fechas:", `${dateRange.start} al ${dateRange.end}`],
+      ["REPORTE DE RENTABILIDAD"],
+      ["Rango:", `${dateRange.start} al ${dateRange.end}`],
       [],
-      ["Sede", "Venta Total (Inc. IGV)", "Costo de Servicio", "Ganancia Neta (Base)", "Rentabilidad %"]
+      ["Sede", "Venta Total", "Costo", "Ganancia", "Rent %"]
     ];
-
-    const rc = resumenSedes.recepcion;
-    const sc = resumenSedes.surco;
-    const gt = resumenSedes.total;
-
     summaryData.push(
-      ["FeetCare (Recepción)", rc.venta, rc.costo, rc.ganancia, `${(rc.venta > 0 ? (rc.ganancia / rc.venta * 100) : 0).toFixed(2)}%`],
-      ["Feet Surco", sc.venta, sc.costo, sc.ganancia, `${(sc.venta > 0 ? (sc.ganancia / sc.venta * 100) : 0).toFixed(2)}%`],
-      [],
-      ["TOTAL GENERAL NEGOCIO", gt.venta, gt.costo, gt.ganancia, `${(gt.venta > 0 ? (gt.ganancia / gt.venta * 100) : 0).toFixed(2)}%`]
+      ["FeetCare", resumenSedes.recepcion.venta, resumenSedes.recepcion.costo, resumenSedes.recepcion.ganancia, `${(resumenSedes.recepcion.venta > 0 ? (resumenSedes.recepcion.ganancia / resumenSedes.recepcion.venta * 100) : 0).toFixed(2)}%`],
+      ["Feet Surco", resumenSedes.surco.venta, resumenSedes.surco.costo, resumenSedes.surco.ganancia, `${(resumenSedes.surco.venta > 0 ? (resumenSedes.surco.ganancia / resumenSedes.surco.venta * 100) : 0).toFixed(2)}%`],
+      ["TOTAL", resumenSedes.total.venta, resumenSedes.total.costo, resumenSedes.total.ganancia, `${(resumenSedes.total.venta > 0 ? (resumenSedes.total.ganancia / resumenSedes.total.venta * 100) : 0).toFixed(2)}%`]
     );
-
-    const wsSum = XLSX.utils.aoa_to_sheet(summaryData);
-    XLSX.utils.book_append_sheet(wb, wsSum, "Resumen Consolidado");
-
-    const createSedeSheet = (data: Venta[], sheetName: string) => {
-      const rows = data.map(v => ({
-        Fecha: v.fecha.toLocaleString('es-PE'),
-        Sede: v.sede,
-        Producto: v.producto,
-        MetodoPago: v.metodoPago,
-        Venta: v.total,
-        Costo: v.costo,
-        Ganancia: v.margen,
-        'Rent %': v.margenPorcentaje
-      }));
-      const ws = XLSX.utils.json_to_sheet(rows);
-      
-      const totalV = data.reduce((s, x) => s + x.total, 0);
-      const totalC = data.reduce((s, x) => s + x.costo, 0);
-      const totalG = data.reduce((s, x) => s + x.margen, 0);
-      const avgR = totalV > 0 ? ((totalG / totalV) * 100).toFixed(2) : "0";
-      
-      XLSX.utils.sheet_add_aoa(ws, [
-        [],
-        ["TOTALES SEDE", "", "", "", totalV, totalC, totalG, `${avgR}%`]
-      ], { origin: -1 });
-
-      return ws;
-    };
-
-    if (dataFeetCare.length > 0) {
-      XLSX.utils.book_append_sheet(wb, createSedeSheet(dataFeetCare, "FeetCare"), "Detalle FeetCare");
-    }
-    if (dataFeetSurco.length > 0) {
-      XLSX.utils.book_append_sheet(wb, createSedeSheet(dataFeetSurco, "Surco"), "Detalle FeetSurco");
-    }
-
-    XLSX.writeFile(wb, `Reporte_Rentabilidad_${dateRange.start}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), "Resumen");
+    XLSX.writeFile(wb, `Rentabilidad_${dateRange.start}.xlsx`);
   };
 
   return (
     <div className="p-4 md:p-10 font-sans max-w-7xl mx-auto space-y-8 animate-in fade-in pb-24">
       
-      {/* HEADER PRINCIPAL */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 border-b border-slate-200 pb-8">
         <div>
            <div className="flex items-center gap-3">
@@ -295,7 +249,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
              <h1 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tighter uppercase italic">Control de Rentabilidad</h1>
            </div>
            <p className="text-slate-500 text-sm mt-2 font-medium flex items-center gap-2">
-             Análisis de Sedes: FeetCare & Feet Surco 
+             Estado actual de ganancias por punto de venta
              {loading && <span className="flex items-center gap-2 text-brand-600 animate-pulse ml-4 font-black text-xs uppercase"><Loader2 className="w-3 h-3 animate-spin"/> {syncProgress}</span>}
            </p>
         </div>
@@ -308,35 +262,24 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
       </div>
 
       {error && (
-        <div className="bg-red-50 border border-red-100 p-6 rounded-[2rem] flex items-center gap-4 text-red-600 animate-bounce">
+        <div className="bg-red-50 border border-red-100 p-6 rounded-[2rem] flex items-center gap-4 text-red-600 animate-in slide-in-from-top-4">
           <AlertCircle className="w-6 h-6" />
-          <p className="font-black text-xs uppercase tracking-widest">{error}</p>
+          <p className="font-black text-xs uppercase tracking-widest leading-relaxed max-w-2xl">{error}</p>
         </div>
       )}
 
-      {/* NAVEGACIÓN DE 3 PESTAÑAS (TABS) */}
       <div className="bg-slate-100 p-2 rounded-[2.8rem] border border-slate-200 flex flex-wrap gap-2 w-full lg:w-fit">
-         <button 
-            onClick={() => setActiveTab('consolidado')} 
-            className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-4 rounded-[2rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'consolidado' ? 'bg-slate-900 text-white shadow-xl scale-[1.02]' : 'text-slate-400 hover:bg-slate-200'}`}
-         >
-            <LayoutGrid className="w-4 h-4" /> Consolidado Global
+         <button onClick={() => setActiveTab('consolidado')} className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-4 rounded-[2rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'consolidado' ? 'bg-slate-900 text-white shadow-xl' : 'text-slate-400 hover:bg-slate-200'}`}>
+            <LayoutGrid className="w-4 h-4" /> Consolidado
          </button>
-         <button 
-            onClick={() => setActiveTab('recepcion')} 
-            className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-4 rounded-[2rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'recepcion' ? 'bg-brand-500 text-white shadow-xl scale-[1.02]' : 'text-slate-400 hover:bg-slate-200'}`}
-         >
-            <Store className="w-4 h-4" /> Sede FeetCare
+         <button onClick={() => setActiveTab('recepcion')} className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-4 rounded-[2rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'recepcion' ? 'bg-brand-500 text-white shadow-xl' : 'text-slate-400 hover:bg-slate-200'}`}>
+            <Store className="w-4 h-4" /> FeetCare
          </button>
-         <button 
-            onClick={() => setActiveTab('surco')} 
-            className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-4 rounded-[2rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'surco' ? 'bg-blue-500 text-white shadow-xl scale-[1.02]' : 'text-slate-400 hover:bg-slate-200'}`}
-         >
-            <MapPin className="w-4 h-4" /> Sede Feet Surco
+         <button onClick={() => setActiveTab('surco')} className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-4 rounded-[2rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'surco' ? 'bg-blue-500 text-white shadow-xl' : 'text-slate-400 hover:bg-slate-200'}`}>
+            <MapPin className="w-4 h-4" /> Surco
          </button>
       </div>
 
-      {/* Filtros de Fecha */}
       <div className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm flex flex-wrap gap-8 items-center">
          <div className="flex bg-slate-50 p-1.5 rounded-2xl border border-slate-100">
             {(['hoy', 'mes', 'anio', 'custom'] as FilterMode[]).map(m => (
@@ -354,15 +297,11 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
          )}
       </div>
 
-      {/* PESTAÑA 1: CONSOLIDADO TOTALES COMPARATIVOS */}
       {activeTab === 'consolidado' && (
         <div className="space-y-8 animate-in slide-in-from-bottom-6">
-           {/* CUADRO COMPARATIVO DE SEDES */}
            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-              {/* Sede FeetCare */}
-              <div className="bg-white p-10 rounded-[3.5rem] border border-slate-100 shadow-sm relative overflow-hidden group hover:shadow-xl transition-all">
-                 <div className="absolute top-0 right-0 w-32 h-32 bg-brand-50 rounded-full blur-3xl -mr-16 -mt-16 transition-all group-hover:bg-brand-100"></div>
-                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2"><Store className="w-4 h-4 text-brand-500" /> Sede FeetCare</h4>
+              <div className="bg-white p-10 rounded-[3.5rem] border border-slate-100 shadow-sm group hover:shadow-xl transition-all">
+                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2"><Store className="w-4 h-4 text-brand-500" /> FeetCare</h4>
                  <div className="space-y-4">
                     <div>
                        <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Venta Total</p>
@@ -375,9 +314,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
                  </div>
               </div>
 
-              {/* Sede Surco */}
-              <div className="bg-white p-10 rounded-[3.5rem] border border-slate-100 shadow-sm relative overflow-hidden group hover:shadow-xl transition-all">
-                 <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-full blur-3xl -mr-16 -mt-16 transition-all group-hover:bg-blue-100"></div>
+              <div className="bg-white p-10 rounded-[3.5rem] border border-slate-100 shadow-sm group hover:shadow-xl transition-all">
                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2"><MapPin className="w-4 h-4 text-blue-500" /> Sede Feet Surco</h4>
                  <div className="space-y-4">
                     <div>
@@ -391,141 +328,72 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
                  </div>
               </div>
 
-              {/* SUMATORIA TOTAL NEGOCIO */}
-              <div className="bg-slate-900 p-10 rounded-[3.5rem] shadow-2xl relative overflow-hidden group hover:scale-[1.02] transition-all">
-                 <div className="absolute top-0 right-0 w-32 h-32 bg-brand-500/20 rounded-full blur-3xl -mr-16 -mt-16"></div>
-                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2"><Plus className="w-4 h-4 text-brand-400" /> Sumatoria Total</h4>
+              <div className="bg-slate-900 p-10 rounded-[3.5rem] shadow-2xl group hover:scale-[1.02] transition-all">
+                 <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-6 flex items-center gap-2"><Plus className="w-4 h-4 text-brand-400" /> Global Negocio</h4>
                  <div className="space-y-4">
                     <div>
                        <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Venta Global</p>
                        <p className="text-3xl font-black text-white">S/ {resumenSedes.total.venta.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</p>
                     </div>
                     <div>
-                       <p className="text-[10px] font-bold text-brand-400 uppercase mb-1">Ganancia Neta Global</p>
+                       <p className="text-[10px] font-bold text-brand-400 uppercase mb-1">Ganancia Neta</p>
                        <p className="text-3xl font-black text-brand-400">S/ {resumenSedes.total.ganancia.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</p>
                     </div>
-                 </div>
-              </div>
-           </div>
-
-           {/* Gráfico de Métodos de Pago Consolidado */}
-           <div className="bg-white p-10 rounded-[3.5rem] border border-slate-100 shadow-sm">
-              <h4 className="text-lg font-black text-slate-900 uppercase tracking-tighter mb-10 flex items-center gap-3"><CreditCard className="text-brand-500 w-6 h-6"/> Distribución de Ingresos Global</h4>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-12 items-center">
-                 <div className="lg:col-span-1 h-[300px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                       <PieChart>
-                          <Pie data={metodosPagoData} cx="50%" cy="50%" innerRadius={70} outerRadius={100} paddingAngle={8} dataKey="value">
-                             {metodosPagoData.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
-                          </Pie>
-                          <Tooltip />
-                       </PieChart>
-                    </ResponsiveContainer>
-                 </div>
-                 <div className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {metodosPagoData.map((m, i) => (
-                       <div key={i} className="flex justify-between items-center p-6 bg-slate-50 rounded-[2rem] border border-slate-100 hover:border-slate-300 transition-all">
-                          <div className="flex items-center gap-4">
-                             <div className="w-4 h-4 rounded-full shadow-sm" style={{backgroundColor: COLORS[i % COLORS.length]}}></div>
-                             <span className="text-[12px] font-black uppercase text-slate-700 tracking-tighter">{m.name}</span>
-                          </div>
-                          <span className="text-lg font-black text-slate-900 tracking-tighter">S/ {m.value.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</span>
-                       </div>
-                    ))}
                  </div>
               </div>
            </div>
         </div>
       )}
 
-      {/* CONTENIDO PESTAÑAS 2 Y 3: DETALLE POR SEDE */}
       {(activeTab === 'recepcion' || activeTab === 'surco') && (
         <div className="space-y-8 animate-in slide-in-from-right-10">
-           
-           {/* KPIs Específicos de la Sede */}
            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Venta Sede (Final)</p>
+                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Venta Sede</p>
                  <h3 className="text-3xl font-black text-slate-900 tracking-tighter">S/ {kpis.totalVenta.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
               </div>
               <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Costo Operativo</p>
+                 <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Costo Total</p>
                  <h3 className="text-3xl font-black text-slate-400 tracking-tighter">S/ {kpis.totalCosto.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
               </div>
               <div className={`p-8 rounded-[2.5rem] text-white shadow-xl ${activeTab === 'recepcion' ? 'bg-brand-500' : 'bg-blue-500'}`}>
-                 <p className="text-white/70 text-[10px] font-black uppercase tracking-widest mb-1">Utilidad Bruta</p>
+                 <p className="text-white/70 text-[10px] font-black uppercase tracking-widest mb-1">Utilidad Sede</p>
                  <h3 className="text-3xl font-black tracking-tighter">S/ {kpis.totalMargen.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
               </div>
            </div>
 
-           {/* TABLA DETALLADA: VENTA - COSTO - GANANCIA */}
            <div className="bg-white rounded-[3.5rem] border border-slate-100 shadow-xl overflow-hidden">
-              <div className="p-10 border-b border-slate-50 flex items-center justify-between bg-slate-50/40">
-                 <div>
-                    <h4 className="text-xl font-black text-slate-900 uppercase tracking-tighter flex items-center gap-3">
-                       <ClipboardList className="text-brand-500 w-6 h-6"/> Listado de Operaciones Rentables
-                    </h4>
-                    <p className="text-[10px] text-slate-400 font-black uppercase tracking-[0.2em] mt-2 italic">Reporte exclusivo para: {activeTab === 'recepcion' ? 'FeetCare (Recepción)' : 'Surco'}</p>
-                 </div>
-              </div>
-              
               <div className="overflow-x-auto">
                  <table className="w-full text-left">
                     <thead className="text-[11px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100 bg-slate-50/80">
                        <tr>
-                          <th className="px-10 py-7">Fecha / Atención</th>
+                          <th className="px-10 py-7">Fecha</th>
                           <th className="px-10 py-7">Servicio / Producto</th>
-                          <th className="px-10 py-7">Método de Pago</th>
-                          <th className="px-10 py-7 text-right">Venta Final</th>
+                          <th className="px-10 py-7 text-right">Venta</th>
                           <th className="px-10 py-7 text-right">Costo</th>
                           <th className="px-10 py-7 text-right">Ganancia</th>
-                          <th className="px-10 py-7 text-center">Rent. %</th>
+                          <th className="px-10 py-7 text-center">Rent %</th>
                        </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-50">
                        {filteredData.map((v, i) => (
-                         <tr key={i} className="hover:bg-slate-50 transition-all group">
-                            <td className="px-10 py-6">
-                               <p className="font-bold text-slate-900 text-sm tracking-tight">{v.fecha.toLocaleDateString('es-PE')}</p>
-                               <p className="text-[10px] text-slate-400 font-mono tracking-tighter">{v.fecha.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
-                            </td>
+                         <tr key={i} className="hover:bg-slate-50 transition-all">
+                            <td className="px-10 py-6 font-bold text-slate-900 text-sm">{v.fecha.toLocaleDateString('es-PE')}</td>
                             <td className="px-10 py-6">
                                <p className="font-black text-slate-800 text-xs uppercase leading-tight">{v.producto}</p>
-                               <div className="flex items-center gap-2 mt-1">
-                                  <Package className="w-3 h-3 text-slate-300" />
-                                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{v.categoria}</span>
-                               </div>
-                            </td>
-                            <td className="px-10 py-6">
-                               <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-xl text-[10px] font-black uppercase border border-blue-100">
-                                  {v.metodoPago}
-                               </span>
+                               <span className="text-[9px] text-slate-300 font-bold uppercase tracking-widest">{v.categoria}</span>
                             </td>
                             <td className="px-10 py-6 text-right font-black text-slate-900 text-sm">S/ {v.total.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
-                            <td className="px-10 py-6 text-right font-bold text-slate-300 text-sm italic">S/ {v.costo.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
+                            <td className="px-10 py-6 text-right font-bold text-slate-300 text-sm">S/ {v.costo.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
                             <td className="px-10 py-6 text-right font-black text-brand-600 text-sm">S/ {v.margen.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
                             <td className="px-10 py-6 text-center">
-                               <div className={`px-4 py-1.5 rounded-xl text-[11px] font-black inline-block ${Number(v.margenPorcentaje) >= 80 ? 'bg-emerald-100 text-emerald-700' : Number(v.margenPorcentaje) >= 50 ? 'bg-brand-100 text-brand-700' : 'bg-orange-100 text-orange-700'}`}>
+                               <div className={`px-4 py-1.5 rounded-xl text-[11px] font-black inline-block ${Number(v.margenPorcentaje) >= 80 ? 'bg-emerald-100 text-emerald-700' : 'bg-brand-100 text-brand-700'}`}>
                                  {v.margenPorcentaje}%
                                </div>
                             </td>
                          </tr>
                        ))}
-                       {filteredData.length === 0 && (
-                           <tr><td colSpan={7} className="px-10 py-32 text-center text-slate-300 font-black text-sm uppercase italic">Sin operaciones registradas</td></tr>
-                       )}
                     </tbody>
-                    {filteredData.length > 0 && (
-                       <tfoot className="bg-slate-900 text-white">
-                           <tr className="font-black">
-                               <td colSpan={3} className="px-10 py-7 text-right text-[11px] uppercase tracking-[0.2em] text-slate-400">Total Acumulado Sede:</td>
-                               <td className="px-10 py-7 text-right text-lg tracking-tighter">S/ {kpis.totalVenta.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
-                               <td className="px-10 py-7 text-right text-slate-500 text-sm italic">S/ {kpis.totalCosto.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
-                               <td className="px-10 py-7 text-right text-brand-400 text-lg tracking-tighter">S/ {kpis.totalMargen.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
-                               <td className="px-10 py-7 text-center bg-brand-600 text-sm italic">{kpis.rentabilidad}%</td>
-                           </tr>
-                       </tfoot>
-                    )}
                  </table>
               </div>
            </div>
