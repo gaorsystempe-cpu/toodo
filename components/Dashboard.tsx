@@ -91,14 +91,30 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
           const linesData = await client.searchRead(session.uid, session.apiKey, 'pos.order.line', [['id', 'in', allLineIds]], 
                 ['product_id', 'qty', 'price_subtotal', 'price_subtotal_incl', 'order_id']);
 
-          setSyncProgress('Sincronizando Costos Reales...');
+          setSyncProgress('Sincronizando Costos por Compañía...');
           const productIds = Array.from(new Set(linesData.map((l: any) => l.product_id[0])));
           
-          // Obtenemos standard_price (Costo Odoo) directamente del producto
-          const products = await client.searchRead(session.uid, session.apiKey, 'product.product', [['id', 'in', productIds]], ['standard_price', 'categ_id']);
+          // IMPORTANTE: standard_price es un campo "company-dependent". 
+          // Debemos enviar el company_id en el contexto para que Odoo devuelva el costo correcto de esa sede/empresa.
+          const products = await client.searchRead(
+            session.uid, 
+            session.apiKey, 
+            'product.product', 
+            [['id', 'in', productIds]], 
+            ['standard_price', 'categ_id', 'product_tmpl_id'],
+            { context: { company_id: session.companyId, allowed_company_ids: [session.companyId] } }
+          );
           
+          console.log("LemonBI - Debug Costos Odoo:", products);
+
           const productMap = new Map<number, { cost: number; cat: string }>(
-            products.map((p: any) => [p.id, { cost: p.standard_price || 0, cat: p.categ_id ? p.categ_id[1] : 'Insumo' }])
+            products.map((p: any) => [
+              p.id, 
+              { 
+                cost: p.standard_price || 0, 
+                cat: p.categ_id ? p.categ_id[1] : 'Insumo' 
+              }
+            ])
           );
           
           const linesByOrder = new Map();
@@ -108,7 +124,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               linesByOrder.get(oId).push(l);
           });
 
-          setSyncProgress('Consolidando Rentabilidad...');
+          setSyncProgress('Calculando Utilidades Reales...');
           const mapped: Venta[] = orders.flatMap((o: any) => {
               const orderLines = linesByOrder.get(o.id) || [];
               const orderDate = new Date(o.date_order.replace(' ', 'T') + 'Z');
@@ -118,12 +134,13 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
                   const pId = l.product_id[0];
                   const pInfo = productMap.get(pId) || { cost: 0, cat: 'Servicio' };
                   
-                  // Venta real = Base Imponible (subtotal)
-                  // El usuario quiere "Monto de Venta" usualmente como el total pagado o el subtotal. 
-                  // Usaremos subtotal para margen y total_incl para visualización de "venta".
+                  // Venta Neta (Subtotal sin impuestos) para el margen
                   const ventaNeta = l.price_subtotal || 0; 
+                  // Venta Total (lo que paga el cliente)
                   const ventaTotal = l.price_subtotal_incl || 0;
+                  // Costo Total = Costo Unitario de la Plantilla (standard_price) * Cantidad
                   const costoLinea = pInfo.cost * l.qty;
+                  // Utilidad = Venta Neta - Costo
                   const utilidadFinal = ventaNeta - costoLinea;
 
                   return {
@@ -145,9 +162,10 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
           });
 
           setVentasData(mapped);
-          setSyncProgress('Sincronizado');
+          setSyncProgress('¡Datos listos!');
       } catch (err: any) {
-          setError(`Error Odoo: ${err.message}. Verifique que el campo 'standard_price' sea accesible.`);
+          console.error("LemonBI Error:", err);
+          setError(`No se pudieron obtener los costos: ${err.message}. Verifique permisos del usuario API.`);
       } finally {
           setLoading(false);
       }
@@ -163,7 +181,12 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
       const v = data.reduce((s, x) => s + x.total, 0);
       const c = data.reduce((s, x) => s + x.costo, 0);
       const g = data.reduce((s, x) => s + x.margen, 0);
-      return { venta: v, costo: c, ganancia: g, rent: v > 0 ? ((g / v) * 100).toFixed(1) : '0' };
+      return { 
+        venta: v, 
+        costo: c, 
+        ganancia: g, 
+        rent: v > 0 ? ((g / v) * 100).toFixed(1) : '0' 
+      };
   };
 
   const statsFeetCare = useMemo(() => getStats(dataFeetCare), [dataFeetCare]);
@@ -173,34 +196,34 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
   const exportExcel = () => {
     const wb = XLSX.utils.book_new();
 
-    // 1. PESTAÑA RESUMEN (REQUERIDO)
     const summaryData = [
-      ["LEMON BI - RESUMEN DE RENTABILIDAD MENSUAL"],
-      ["Periodo:", `${dateRange.start} al ${dateRange.end}`],
+      ["LEMON BI - REPORTE DE RENTABILIDAD CON COSTOS ODOO"],
+      ["Compañía:", session?.companyName || 'FeetCare'],
+      ["Rango:", `${dateRange.start} al ${dateRange.end}`],
       [],
-      ["Punto de Venta / Sede", "Venta Total (Inc. IGV)", "Costo Total (Gastos)", "Rentabilidad Final", "Margen %"]
+      ["Punto de Venta", "Venta Total (Inc. IGV)", "Inversión (Costo)", "Utilidad Bruta", "Margen %"]
     ];
 
     summaryData.push(
-      ["FEETCARE (RECEPCIÓN)", statsFeetCare.venta, statsFeetCare.costo, statsFeetCare.ganancia, statsFeetCare.rent + "%"],
+      ["FEETCARE", statsFeetCare.venta, statsFeetCare.costo, statsFeetCare.ganancia, statsFeetCare.rent + "%"],
       ["FEET SURCO", statsSurco.venta, statsSurco.costo, statsSurco.ganancia, statsSurco.rent + "%"],
       [],
-      ["TOTAL CONSOLIDADO", statsTotal.venta, statsTotal.costo, statsTotal.ganancia, statsTotal.rent + "%"]
+      ["TOTAL GENERAL", statsTotal.venta, statsTotal.costo, statsTotal.ganancia, statsTotal.rent + "%"]
     );
 
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), "Resumen General");
 
-    // 2. DETALLE FEETCARE
     const createSheet = (data: Venta[]) => {
       const rows = data.map(v => ({
         'Fecha': v.fecha.toLocaleDateString('es-PE'),
-        'Producto / Servicio': v.producto,
+        'Producto': v.producto,
         'Categoría': v.categoria,
         'Cant.': v.cantidad,
-        'Monto de Venta': v.total,
-        'Monto de Costo': v.costo,
-        'Ganancia Final': v.margen,
-        '% Rent': v.margenPorcentaje + '%'
+        'Venta (S/)': v.total,
+        'Costo Unit.': v.costo / v.cantidad,
+        'Costo Total': v.costo,
+        'Ganancia': v.margen,
+        '%': v.margenPorcentaje + '%'
       }));
       return XLSX.utils.json_to_sheet(rows);
     };
@@ -208,7 +231,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
     if (dataFeetCare.length > 0) XLSX.utils.book_append_sheet(wb, createSheet(dataFeetCare), "Detalle FeetCare");
     if (dataFeetSurco.length > 0) XLSX.utils.book_append_sheet(wb, createSheet(dataFeetSurco), "Detalle Surco");
 
-    XLSX.writeFile(wb, `Reporte_Rentabilidad_${dateRange.start}.xlsx`);
+    XLSX.writeFile(wb, `Rentabilidad_Odoo_Sedes_${dateRange.start}.xlsx`);
   };
 
   const ReportSection = ({ data, title, totals }: { data: Venta[], title: string, totals: any }) => (
@@ -218,10 +241,10 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
            <h3 className="text-xl font-black text-slate-900 uppercase tracking-tighter flex items-center gap-3">
              <ClipboardList className="text-brand-500 w-6 h-6" /> {title}
            </h3>
-           <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mt-1">Sincronizado con base de datos real de Odoo</p>
+           <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mt-1">Sincronización de costos en tiempo real desde Plantillas de Odoo</p>
         </div>
         <div className="text-right">
-           <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Items Vendidos</p>
+           <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Items Sincronizados</p>
            <p className="text-xl font-black text-slate-900">{data.length}</p>
         </div>
       </div>
@@ -230,10 +253,10 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
           <thead className="bg-slate-50/50 text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100">
             <tr>
               <th className="px-10 py-6">Fecha</th>
-              <th className="px-10 py-6">Producto o Servicio</th>
+              <th className="px-10 py-6">Producto / Servicio</th>
               <th className="px-10 py-6 text-right">Monto Venta</th>
-              <th className="px-10 py-6 text-right">Monto Costo</th>
-              <th className="px-10 py-6 text-right">Ganancia Final</th>
+              <th className="px-10 py-6 text-right">Costo (Template)</th>
+              <th className="px-10 py-6 text-right">Ganancia</th>
               <th className="px-10 py-6 text-center">Rent %</th>
             </tr>
           </thead>
@@ -246,7 +269,10 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
                    <p className="text-[9px] text-slate-400 font-bold mt-1 uppercase tracking-wider">{v.categoria}</p>
                 </td>
                 <td className="px-10 py-5 text-right font-black text-slate-900 text-sm">S/ {v.total.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
-                <td className="px-10 py-5 text-right font-bold text-slate-300 text-sm italic">S/ {v.costo.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
+                <td className={`px-10 py-5 text-right font-bold text-sm italic ${v.costo > 0 ? 'text-slate-400' : 'text-amber-500 underline decoration-dotted'}`}>
+                  S/ {v.costo.toLocaleString('es-PE', { minimumFractionDigits: 2 })}
+                  {v.costo === 0 && <span className="block text-[8px] font-black uppercase">Sin costo en Odoo</span>}
+                </td>
                 <td className="px-10 py-5 text-right font-black text-brand-600 text-sm">S/ {v.margen.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
                 <td className="px-10 py-5 text-center">
                    <div className={`px-3 py-1 rounded-lg text-[10px] font-black inline-block ${Number(v.margenPorcentaje) > 60 ? 'bg-emerald-100 text-emerald-700' : 'bg-brand-100 text-brand-700'}`}>
@@ -256,13 +282,13 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               </tr>
             ))}
             {data.length === 0 && (
-              <tr><td colSpan={6} className="px-10 py-24 text-center text-slate-300 font-black uppercase italic tracking-widest">Sin ventas registradas en Odoo para este periodo</td></tr>
+              <tr><td colSpan={6} className="px-10 py-24 text-center text-slate-300 font-black uppercase italic tracking-widest">Sin registros encontrados</td></tr>
             )}
           </tbody>
           {data.length > 0 && (
             <tfoot className="bg-slate-900 text-white">
               <tr className="font-black">
-                <td colSpan={2} className="px-10 py-8 text-right text-[11px] uppercase tracking-[0.2em] text-slate-400">Sumatoria Total {title}:</td>
+                <td colSpan={2} className="px-10 py-8 text-right text-[11px] uppercase tracking-[0.2em] text-slate-400">Totales {title}:</td>
                 <td className="px-10 py-8 text-right text-xl tracking-tighter text-white">S/ {totals.venta.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
                 <td className="px-10 py-8 text-right text-slate-500 text-sm italic">S/ {totals.costo.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
                 <td className="px-10 py-8 text-right text-brand-400 text-xl tracking-tighter">S/ {totals.ganancia.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</td>
@@ -280,7 +306,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
   return (
     <div className="p-4 md:p-10 font-sans max-w-7xl mx-auto space-y-8 animate-in fade-in pb-24">
       
-      {/* HEADER DE CONTROL */}
+      {/* HEADER */}
       <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 border-b border-slate-200 pb-10">
         <div className="space-y-2">
            <div className="flex items-center gap-4">
@@ -288,34 +314,34 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
              <h1 className="text-4xl font-black text-slate-900 tracking-tighter uppercase italic leading-none">Análisis de Rentabilidad</h1>
            </div>
            <p className="text-slate-500 text-sm font-medium ml-1">
-             Sincronización de costos reales y márgenes de ganancia por sede.
+             Sincronización exacta con costos de Odoo por Compañía.
              {loading && <span className="ml-4 text-brand-600 font-black text-[10px] uppercase animate-pulse flex items-center gap-2 inline-flex"><Loader2 className="w-3 h-3 animate-spin"/> {syncProgress}</span>}
            </p>
         </div>
         <div className="flex gap-4 w-full lg:w-auto">
            <button onClick={fetchData} disabled={loading} className="flex-1 lg:flex-none flex items-center justify-center gap-3 bg-white px-8 py-4 rounded-2xl border border-slate-200 font-black text-[11px] hover:bg-slate-50 transition-all uppercase tracking-widest shadow-sm">
-             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-brand-500' : ''}`} /> Sincronizar
+             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-brand-500' : ''}`} /> Sincronizar Odoo
            </button>
            <button onClick={exportExcel} className="flex-1 lg:flex-none flex items-center justify-center gap-3 bg-slate-900 text-white px-8 py-4 rounded-2xl font-black text-[11px] shadow-2xl hover:bg-slate-800 transition-all uppercase tracking-widest">
-             <FileSpreadsheet className="w-4 h-4" /> Exportar Excel
+             <FileSpreadsheet className="w-4 h-4" /> Generar Excel
            </button>
         </div>
       </div>
 
-      {/* TABS DE SEDES */}
+      {/* SEDES TABS */}
       <div className="bg-slate-100 p-2 rounded-[3rem] border border-slate-200 flex flex-wrap gap-2 w-full lg:w-fit shadow-inner">
          <button onClick={() => setActiveTab('consolidado')} className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-5 rounded-[2.5rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'consolidado' ? 'bg-slate-900 text-white shadow-2xl scale-[1.02]' : 'text-slate-400 hover:bg-slate-200'}`}>
-            <LayoutGrid className="w-4 h-4" /> Consolidado Global
+            <LayoutGrid className="w-4 h-4" /> Global
          </button>
          <button onClick={() => setActiveTab('recepcion')} className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-5 rounded-[2.5rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'recepcion' ? 'bg-brand-500 text-white shadow-2xl scale-[1.02]' : 'text-slate-400 hover:bg-slate-200'}`}>
-            <Store className="w-4 h-4" /> FeetCare (Mes)
+            <Store className="w-4 h-4" /> FeetCare
          </button>
          <button onClick={() => setActiveTab('surco')} className={`flex-1 lg:flex-none flex items-center justify-center gap-3 px-10 py-5 rounded-[2.5rem] font-black text-[11px] uppercase tracking-widest transition-all ${activeTab === 'surco' ? 'bg-blue-600 text-white shadow-2xl scale-[1.02]' : 'text-slate-400 hover:bg-slate-200'}`}>
-            <MapPin className="w-4 h-4" /> Feet Surco (Mes)
+            <MapPin className="w-4 h-4" /> Surco
          </button>
       </div>
 
-      {/* FILTROS DE TIEMPO */}
+      {/* FILTROS FECHA */}
       <div className="bg-white p-8 rounded-[3rem] border border-slate-100 shadow-sm flex flex-wrap gap-10 items-center">
          <div className="flex bg-slate-50 p-1.5 rounded-2xl border border-slate-200">
             {(['hoy', 'mes', 'anio', 'custom'] as FilterMode[]).map(m => (
@@ -331,44 +357,39 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
               <input type="date" value={dateRange.end} onChange={e => setDateRange({...dateRange, end: e.target.value})} className="p-4 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold shadow-inner" />
            </div>
          )}
-         <div className="flex-1 flex justify-end">
-            <div className="flex items-center gap-2 text-[10px] font-black text-slate-400 uppercase tracking-widest bg-slate-50 px-5 py-2 rounded-full border border-slate-100">
-              {new Date().toLocaleTimeString()} • Datos Reales Odoo
-            </div>
-         </div>
       </div>
 
-      {/* RESUMEN KPI GLOBAL */}
+      {/* KPIs GLOBALES */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-             <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1 flex items-center gap-2"><ArrowDownToLine className="w-3 h-3"/> Venta Mensual Bruta</p>
+             <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1 flex items-center gap-2"><ArrowDownToLine className="w-3 h-3"/> Venta Mensual</p>
              <h3 className="text-3xl font-black text-slate-900 tracking-tighter">S/ {statsTotal.venta.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
           </div>
           <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-             <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1 flex items-center gap-2"><Calculator className="w-3 h-3"/> Costo / Inversión</p>
+             <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1 flex items-center gap-2"><Calculator className="w-3 h-3"/> Costo (Inversión)</p>
              <h3 className="text-3xl font-black text-slate-400 tracking-tighter">S/ {statsTotal.costo.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
           </div>
           <div className="bg-brand-500 p-8 rounded-[2.5rem] shadow-xl shadow-brand-500/20 text-white">
-             <p className="text-white/70 text-[10px] font-black uppercase tracking-widest mb-1">Ganancia Real Neta</p>
+             <p className="text-white/70 text-[10px] font-black uppercase tracking-widest mb-1">Utilidad Bruta</p>
              <h3 className="text-3xl font-black tracking-tighter">S/ {statsTotal.ganancia.toLocaleString('es-PE', { minimumFractionDigits: 2 })}</h3>
           </div>
           <div className="bg-slate-900 p-8 rounded-[2.5rem] shadow-xl text-white">
-             <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mb-1">Margen Comercial</p>
+             <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mb-1">Margen %</p>
              <h3 className="text-3xl font-black tracking-tighter text-brand-400">{statsTotal.rent}%</h3>
           </div>
       </div>
 
-      {/* REPORTES POR SEDE */}
+      {/* REPORTES */}
       <div className="space-y-4">
          {activeTab === 'consolidado' ? (
            <>
-              <ReportSection data={dataFeetCare} title="Reporte Mensual: FeetCare (Recepc.)" totals={statsFeetCare} />
-              <ReportSection data={dataFeetSurco} title="Reporte Mensual: Feet Surco" totals={statsSurco} />
+              <ReportSection data={dataFeetCare} title="Reporte: Sede FeetCare" totals={statsFeetCare} />
+              <ReportSection data={dataFeetSurco} title="Reporte: Sede Surco" totals={statsSurco} />
            </>
          ) : activeTab === 'recepcion' ? (
-           <ReportSection data={dataFeetCare} title="Detalle Mensual FeetCare" totals={statsFeetCare} />
+           <ReportSection data={dataFeetCare} title="Sede FeetCare" totals={statsFeetCare} />
          ) : (
-           <ReportSection data={dataFeetSurco} title="Detalle Mensual Surco" totals={statsSurco} />
+           <ReportSection data={dataFeetSurco} title="Sede Surco" totals={statsSurco} />
          )}
       </div>
 
@@ -376,7 +397,7 @@ const Dashboard: React.FC<DashboardProps> = ({ session }) => {
         <div className="bg-rose-50 border border-rose-100 p-8 rounded-[3rem] flex items-center gap-6 text-rose-600 animate-in slide-in-from-top-6 shadow-xl">
           <AlertCircle className="w-8 h-8" />
           <div>
-            <p className="font-black text-xs uppercase tracking-[0.2em] mb-1">Error al Conectar con Odoo</p>
+            <p className="font-black text-xs uppercase tracking-[0.2em] mb-1">Error de Datos</p>
             <p className="font-medium text-sm leading-relaxed">{error}</p>
           </div>
         </div>
